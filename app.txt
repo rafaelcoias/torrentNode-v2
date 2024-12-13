@@ -1,0 +1,488 @@
+public class App {
+    public static void main(String[] args) {
+        // Guardar em variaveis os argumentos fornecidos, ou usar valores padrão
+        String ipAddress = args.length > 0 ? args[0] : "127.0.0.1";
+        int port = args.length > 1 ? Integer.parseInt(args[1]) : 8080;
+        String fileDirectory = args.length > 2 ? args[2] : System.getProperty("user.dir");
+
+        System.out.println("A inicializar novo nó:");
+        System.out.println("=> Endereço IP: " + ipAddress);
+        System.out.println("=> Porta: " + port);
+        System.out.println("=> Pasta de ficheiros: " + fileDirectory);
+
+        // Criar um novo nó
+        new IscTorrentNode(ipAddress, port, fileDirectory);
+    }
+}
+import java.util.*;
+import java.util.concurrent.*;
+
+public class DownloadTasksManager {
+    private final Map<String, byte[]> downloadedBlocks = new ConcurrentHashMap<>();
+    private final ThreadPoolExecutor executor;
+
+    public DownloadTasksManager(int maxThreads) {
+        this.executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(maxThreads);
+    }
+
+    public synchronized void addTask(FileBlockRequestMessage task, PeerConnection peer) {
+        executor.execute(() -> processTask(task, peer));
+    }
+
+    private void processTask(FileBlockRequestMessage task, PeerConnection peer) {
+        try {
+            // Enviar a solicitação para o nó remoto
+            FileBlockAnswerMessage response = requestBlockFromNode(task, peer);
+
+            // Salvar o bloco recebido
+            downloadedBlocks.put(task.getFileHash() + "-" + task.getOffset(), response.getBlockData());
+        } catch (Exception e) {
+            System.err.println("Erro ao processar bloco: " + task.getFileHash() + " Offset: " + task.getOffset());
+            e.printStackTrace();
+        }
+    }
+
+    private FileBlockAnswerMessage requestBlockFromNode(FileBlockRequestMessage task, PeerConnection peer) {
+        // Simular ou implementar a comunicação com o nó remoto
+        NetworkUtils.sendMessage(peer.getIpAddress(), peer.getPort(), task);
+        return new FileBlockAnswerMessage(new byte[task.getLength()]); // Substituir com resposta real
+    }
+
+    public void shutdown() {
+        executor.shutdown();
+    }
+
+    public Map<String, byte[]> getDownloadedBlocks() {
+        return downloadedBlocks;
+    }
+}
+import java.io.Serializable;
+
+public class FileBlockAnswerMessage implements Serializable {
+    private byte[] blockData;
+
+    public FileBlockAnswerMessage(byte[] blockData) {
+        this.blockData = blockData;
+    }
+
+    public byte[] getBlockData() {
+        return blockData;
+    }
+}
+import java.io.Serializable;
+
+public class FileBlockRequestMessage implements Serializable {
+    private String fileHash;
+    private long offset;
+    private int length;
+
+    public FileBlockRequestMessage(String fileHash, long offset, int length) {
+        this.fileHash = fileHash;
+        this.offset = offset;
+        this.length = length;
+    }
+
+    public String getFileHash() {
+        return fileHash;
+    }
+
+    public long getOffset() {
+        return offset;
+    }
+
+    public int getLength() {
+        return length;
+    }
+}
+import java.io.Serializable;
+
+public class FileSearchResult implements Serializable {
+    private String fileName;
+    private String fileHash;
+    private long fileSize;
+    private String nodeAddress;
+    private int nodePort;
+
+    public FileSearchResult(String fileName, String fileHash, long fileSize, String nodeAddress, int nodePort) {
+        this.fileName = fileName;
+        this.fileHash = fileHash;
+        this.fileSize = fileSize;
+        this.nodeAddress = nodeAddress;
+        this.nodePort = nodePort;
+    }
+
+    public String getFileName() {
+        return fileName;
+    }
+
+    public String getFileHash() {
+        return fileHash;
+    }
+
+    public long getFileSize() {
+        return fileSize;
+    }
+
+    public String getNodeAddress() {
+        return nodeAddress;
+    }
+
+    public int getNodePort() {
+        return nodePort;
+    }
+}
+import java.io.*;
+import java.util.Map;
+
+public class FileWriterUtil {
+
+    public static void writeFileToDisk(String fileHash, long fileSize, String filePath, Map<String, byte[]> downloadedBlocks) {
+        try (FileOutputStream fos = new FileOutputStream(filePath)) {
+            for (long offset = 0; offset < fileSize; offset += 10240) {
+                byte[] block = downloadedBlocks.get(fileHash + "-" + offset);
+                if (block != null) {
+                    fos.write(block);
+                } else {
+                    throw new IOException("Bloco ausente no offset: " + offset);
+                }
+            }
+            System.out.println("Arquivo " + filePath + " foi escrito com sucesso!");
+        } catch (IOException e) {
+            System.err.println("Erro ao escrever o arquivo: " + filePath);
+            e.printStackTrace();
+        }
+    }
+}
+import java.io.FileInputStream;
+import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+
+public class HashUtils {
+    public static String calculateHash(String filePath) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            FileInputStream fis = new FileInputStream(filePath);
+            byte[] byteArray = new byte[1024];
+            int bytesRead;
+
+            while ((bytesRead = fis.read(byteArray)) != -1) {
+                digest.update(byteArray, 0, bytesRead);
+            }
+
+            fis.close();
+            byte[] bytes = digest.digest();
+            StringBuilder sb = new StringBuilder();
+            for (byte b : bytes) {
+                sb.append(String.format("%02x", b));
+            }
+            return sb.toString();
+        } catch (NoSuchAlgorithmException | IOException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+}
+import javax.swing.*;
+import java.awt.*;
+import java.io.File;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.List;
+
+public class IscTorrentNode {
+    private final String ipAddress;
+    private final int port;
+    private final String fileDirectory;
+    private final List<PeerConnection> connectedPeers = new CopyOnWriteArrayList<>();
+    private JTextArea logArea;
+    private DefaultListModel<String> searchResults;
+    private JTextField searchField;
+
+    public IscTorrentNode(String ipAddress, int port, String fileDirectory) {
+        this.ipAddress = ipAddress;
+        this.port = port;
+        this.fileDirectory = fileDirectory;
+        start();
+    }
+
+    public void start() {
+        new Thread(this::startServer).start();
+        initializeInterface();
+    }
+
+    private void startServer() {
+        NodeServer server = new NodeServer(port, fileDirectory);
+        server.startServer();
+    }
+
+    private void initializeInterface() {
+        JFrame frame = new JFrame("Sistema de Partilha de Ficheiros");
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setSize(800, 600);
+    
+        // Informações do nó
+        JPanel infoPanel = new JPanel();
+        infoPanel.setLayout(new FlowLayout(FlowLayout.LEFT));
+        JLabel infoLabel = new JLabel("IP: " + ipAddress + " | Porta: " + port + " | Pasta: " + fileDirectory);
+        infoPanel.add(infoLabel);
+    
+        frame.add(infoPanel, BorderLayout.NORTH);
+    
+        // Painel central: pesquisa e resultados
+        JPanel centerPanel = new JPanel(new BorderLayout());
+    
+        JTextField searchField = new JTextField(20);
+        JButton searchButton = new JButton("Procurar");
+        DefaultListModel<String> searchResults = new DefaultListModel<>();
+        JList<String> searchResultsList = new JList<>(searchResults);
+        JScrollPane scrollPane = new JScrollPane(searchResultsList);
+    
+        JPanel searchPanel = new JPanel(new FlowLayout());
+        searchPanel.add(new JLabel("Texto a procurar:"));
+        searchPanel.add(searchField);
+        searchPanel.add(searchButton);
+    
+        centerPanel.add(searchPanel, BorderLayout.NORTH);
+        centerPanel.add(scrollPane, BorderLayout.CENTER);
+    
+        // Log de progresso
+        logArea = new JTextArea(10, 50);
+        logArea.setEditable(false);
+        JScrollPane logScrollPane = new JScrollPane(logArea);
+    
+        // Divisão entre a pesquisa e os logs usando JSplitPane
+        JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, centerPanel, logScrollPane);
+        splitPane.setDividerLocation(500); // Define a largura inicial da divisão
+        splitPane.setResizeWeight(0.7);    // Prioriza o lado esquerdo ao redimensionar
+        frame.add(splitPane, BorderLayout.CENTER);
+    
+        // Painel de ações
+        JPanel actionPanel = new JPanel(new FlowLayout());
+        JButton connectButton = new JButton("Ligar a Nó");
+        JButton downloadButton = new JButton("Descarregar");
+        actionPanel.add(downloadButton);
+        actionPanel.add(connectButton);
+        frame.add(actionPanel, BorderLayout.SOUTH);
+    
+        // Ações dos botões
+        searchButton.addActionListener(e -> {
+            String searchTerm = searchField.getText().trim();
+            if (searchTerm.isEmpty()) {
+                JOptionPane.showMessageDialog(frame, "Por favor, insira um termo de pesquisa válido.");
+                return;
+            }
+            searchFiles(searchTerm, searchResults);
+        });
+    
+        connectButton.addActionListener(e -> connectNode());
+    
+        downloadButton.addActionListener(e -> {
+            String selectedFile = searchResultsList.getSelectedValue();
+            if (selectedFile == null) {
+                JOptionPane.showMessageDialog(frame, "Por favor, selecione um ficheiro para descarregar.");
+                return;
+            }
+            downloadFile(selectedFile);
+        });
+    
+        frame.setVisible(true);
+    }
+    
+
+    private void connectNode() {
+        String input = JOptionPane.showInputDialog("Digite o IP e a porta do nó (formato: IP:PORTA):");
+        if (input == null || !input.contains(":")) {
+            JOptionPane.showMessageDialog(null, "Formato inválido. Use IP:PORTA.");
+            return;
+        }
+
+        String[] parts = input.split(":");
+        String ip = parts[0];
+        int port = Integer.parseInt(parts[1]);
+
+        PeerConnection peer = new PeerConnection(ip, port);
+        connectedPeers.add(peer);
+        logArea.append("Conectado ao nó: " + ip + ":" + port + "\n");
+    }
+
+    private void searchFiles(String searchTerm, DefaultListModel<String> results) {
+        logArea.append("Procurando por: " + searchTerm + "\n");
+
+        WordSearchMessage message = new WordSearchMessage(searchTerm);
+        for (PeerConnection peer : connectedPeers) {
+            NetworkUtils.sendMessage(peer.getIpAddress(), peer.getPort(), message);
+        }
+
+        // Simulação: limpar e adicionar um exemplo para teste
+        results.clear();
+        results.addElement("Exemplo.txt (127.0.0.1:8081)");
+    }
+
+    private void downloadFile(String selectedFile) {
+        logArea.append("Iniciando o download do arquivo: " + selectedFile + "\n");
+        String fileHash = extractFileHash(selectedFile);
+        long fileSize = getFileSize(fileHash);
+
+        DownloadTasksManager manager = new DownloadTasksManager(5);
+        int blockSize = 10240;
+
+        for (long offset = 0; offset < fileSize; offset += blockSize) {
+            int length = (int) Math.min(blockSize, fileSize - offset);
+            FileBlockRequestMessage task = new FileBlockRequestMessage(fileHash, offset, length);
+
+            // Enviar o pedido ao primeiro nó conectado (ajustar se necessário)
+            if (!connectedPeers.isEmpty()) {
+                manager.addTask(task, connectedPeers.get(0));
+            } else {
+                logArea.append("Nenhum nó conectado.\n");
+                return;
+            }
+        }
+
+        // Após o download, escrever o arquivo no disco
+        new Thread(() -> {
+            manager.shutdown();
+            FileWriterUtil.writeFileToDisk(fileHash, fileSize, fileDirectory + "/" + fileHash,
+                    manager.getDownloadedBlocks());
+            logArea.append("Download concluído para o arquivo: " + fileHash + "\n");
+        }).start();
+    }
+
+    private String extractFileHash(String selectedFile) {
+        int spaceIndex = selectedFile.indexOf(' ');
+        if (spaceIndex != -1) {
+            return selectedFile.substring(0, spaceIndex);
+        }
+        return selectedFile;
+    }
+
+    private long getFileSize(String fileHash) {
+        File file = new File(fileDirectory + "/" + fileHash);
+        return file.exists() ? file.length() : 0;
+    }
+
+}
+import java.io.*;
+import java.net.*;
+
+public class NetworkUtils {
+    public static void sendMessage(String address, int port, Serializable message) {
+        try (Socket socket = new Socket(address, port);
+                ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
+            out.writeObject(message);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+import java.io.*;
+import java.net.*;
+import java.util.*;
+
+public class NodeServer {
+    private final int port;
+    private final String fileDirectory;
+
+    public NodeServer(int port, String fileDirectory) {
+        this.port = port;
+        this.fileDirectory = fileDirectory;
+    }
+
+    public void startServer() {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Servidor ativo na porta " + port);
+            while (true) {
+                Socket clientSocket = serverSocket.accept();
+                new Thread(() -> handleClient(clientSocket)).start();
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void handleClient(Socket clientSocket) {
+        try (ObjectInputStream in = new ObjectInputStream(clientSocket.getInputStream());
+             ObjectOutputStream out = new ObjectOutputStream(clientSocket.getOutputStream())) {
+
+            Object message = in.readObject();
+            processMessage(message, clientSocket, out);
+        } catch (IOException | ClassNotFoundException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void processMessage(Object message, Socket clientSocket, ObjectOutputStream out) {
+        if (message instanceof WordSearchMessage) {
+            handleSearch((WordSearchMessage) message, out);
+        } else if (message instanceof FileBlockRequestMessage) {
+            handleBlockRequest((FileBlockRequestMessage) message, out);
+        } else if (message instanceof FileBlockAnswerMessage) {
+            handleBlockResponse((FileBlockAnswerMessage) message);
+        }
+    }
+
+    private void handleSearch(WordSearchMessage searchMessage, ObjectOutputStream out) {
+        List<FileSearchResult> results = new ArrayList<>();
+        File folder = new File(fileDirectory);
+
+        for (File file : folder.listFiles()) {
+            if (file.getName().contains(searchMessage.getKeyword())) {
+                String hash = HashUtils.calculateHash(file.getAbsolutePath());
+                results.add(new FileSearchResult(file.getName(), hash, file.length(), "127.0.0.1", port));
+            }
+        }
+
+        try {
+            out.writeObject(results);
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void handleBlockRequest(FileBlockRequestMessage blockRequest, ObjectOutputStream out) {
+        try {
+            File file = new File(fileDirectory + "/" + blockRequest.getFileHash());
+            try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+                raf.seek(blockRequest.getOffset());
+                byte[] buffer = new byte[blockRequest.getLength()];
+                raf.read(buffer);
+                out.writeObject(new FileBlockAnswerMessage(buffer));
+            }
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    private void handleBlockResponse(FileBlockAnswerMessage blockAnswer) {
+        System.out.println("Bloco recebido: " + blockAnswer.getBlockData().length + " bytes");
+    }
+}public class PeerConnection {
+    private String ipAddress;
+    private int port;
+
+    public PeerConnection(String ipAddress, int port) {
+        this.ipAddress = ipAddress;
+        this.port = port;
+    }
+
+    public String getIpAddress() {
+        return ipAddress;
+    }
+
+    public int getPort() {
+        return port;
+    }
+}
+import java.io.Serializable;
+
+public class WordSearchMessage implements Serializable {
+    private String keyword;
+
+    public WordSearchMessage(String keyword) {
+        this.keyword = keyword;
+    }
+
+    public String getKeyword() {
+        return keyword;
+    }
+}
